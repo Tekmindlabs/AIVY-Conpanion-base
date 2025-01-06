@@ -5,6 +5,7 @@ import { MemoryService } from "../memory/memory-service";
 import { Message } from "@/types/chat";
 import { AgentState, EmotionalState, AgentRole } from "./agents";
 import { MemoryTools } from "../memory/memory-tools";
+import { createRelationship, findRelatedContent } from '@/lib/milvus/knowledge-graph';
 
 // Define base interfaces
 interface ReActStep {
@@ -27,6 +28,12 @@ interface Memory {
     contentType?: string;
     context?: any;
     messages?: Message[];
+    relationships?: string[];
+    entities?: Array<{
+      source: string;
+      relationship: string;
+      target: string;
+    }>;
   };
 }
 
@@ -42,6 +49,12 @@ export interface HybridState extends AgentState {
   currentStep: string;
   userId: string;
   messages: Message[];
+  emotionalHistory?: Array<{
+    timestamp: string;
+    mood: string;
+    confidence: string;
+    trigger?: string;
+  }>;
   context: {
     role: AgentRole;
     analysis: {
@@ -91,6 +104,23 @@ const createMessage = (content: string, role: 'user' | 'assistant'): Message => 
   createdAt: new Date()
 });
 
+const optimizeMemories = async (memoryService: MemoryService, userId: string) => {
+  const oldMemories = await memoryService.searchMemories('', userId, 1000);
+  const grouped = oldMemories.reduce((acc, memory) => {
+    const date = memory.timestamp.split('T')[0];
+    acc[date] = acc[date] || [];
+    acc[date].push(memory);
+    return acc;
+  }, {} as Record<string, Memory[]>);
+
+  // Merge similar memories from same day
+  for (const [date, memories] of Object.entries(grouped)) {
+    if (memories.length > 10) {
+      // Implement memory consolidation logic here
+    }
+  }
+};
+
 export const createHybridAgent = (model: any, memoryService: MemoryService) => {
   const emotionalAgent = createEmotionalAgent(model);
   const memoryTools = new MemoryTools(memoryService);
@@ -110,9 +140,23 @@ export const createHybridAgent = (model: any, memoryService: MemoryService) => {
     emotionalState: EmotionalState,
     memories: Memory[]
   ): Promise<ReActStep> => {
-    const memoryContext = memories
-      .map((memory: Memory) => 
-        `Memory: ${memory.content} (Emotional: ${memory.emotionalState?.mood || 'Unknown'})`
+    const emotionalTrends = state.emotionalHistory
+      ?.slice(-5)
+      .map(h => `${h.mood} (${h.timestamp})`)
+      .join(' -> ');
+  
+    const memoryContext = (memories as Memory[])
+      .map((memory: Memory) => ({
+        content: memory.content,
+        emotion: memory.emotionalState?.mood,
+        timestamp: memory.timestamp,
+        relationships: memory.metadata?.relationships || []
+      }))
+      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+      .map(m => 
+        `Memory [${m.timestamp}]: ${m.content} 
+         Emotional: ${m.emotion}
+         Related: ${m.relationships.join(', ')}`
       )
       .join('\n');
 
@@ -121,6 +165,9 @@ export const createHybridAgent = (model: any, memoryService: MemoryService) => {
       
       Memory Context:
       ${memoryContext}
+      
+      Emotional History:
+      ${emotionalTrends}
       
       Current Emotional State: ${emotionalState.mood} (Confidence: ${emotionalState.confidence})
       Current User Context:
@@ -160,7 +207,6 @@ export const createHybridAgent = (model: any, memoryService: MemoryService) => {
           throw new Error("Invalid message format - content is required");
         }
 
-        // Transform search results into Memory objects
         const searchResults = await memoryService.searchMemories(
           lastMessage.content,
           state.userId,
@@ -187,6 +233,17 @@ export const createHybridAgent = (model: any, memoryService: MemoryService) => {
           }
         });
 
+        // Update emotional history
+        state.emotionalHistory = [
+          ...(state.emotionalHistory || []),
+          {
+            timestamp: new Date().toISOString(),
+            mood: emotionalAnalysis.emotionalState.mood,
+            confidence: emotionalAnalysis.emotionalState.confidence,
+            trigger: lastMessage.content
+          }
+        ];
+
         const reactStep = await executeReActStep(
           state.currentStep,
           state,
@@ -204,6 +261,7 @@ export const createHybridAgent = (model: any, memoryService: MemoryService) => {
         const newMemory = {
           userId: state.userId,
           content: lastMessage.content,
+          contentType: 'conversation', // Add this line
           metadata: {
             messages: [createMessage(lastMessage.content, 'user')],
             emotionalState: emotionalAnalysis.emotionalState,
@@ -213,7 +271,22 @@ export const createHybridAgent = (model: any, memoryService: MemoryService) => {
           }
         };
 
-        await memoryService.addMemory(newMemory);
+        const savedMemory = await memoryService.addMemory(newMemory);
+
+        // Create relationships between related memories
+        await Promise.all(relevantMemories.map(async (relatedMemory) => {
+          await createRelationship({
+            userId: state.userId,
+            sourceId: savedMemory.id,
+            targetId: relatedMemory.id,
+            relationshipType: 'contextually_related',
+            metadata: {
+              similarity: 0.8,
+              emotionalAlignment: emotionalAnalysis.emotionalState.mood === relatedMemory.emotionalState.mood,
+              createdAt: new Date().toISOString()
+            }
+          });
+        }));
 
         if (state.context.relationshipDynamics.interactionHistory) {
           state.context.relationshipDynamics.interactionHistory.push(lastMessage.content);
@@ -221,6 +294,11 @@ export const createHybridAgent = (model: any, memoryService: MemoryService) => {
         
         state.context.relationshipDynamics.connectionStrength = 
           calculateConnectionStrength(state.context.relationshipDynamics);
+
+        // Check if memory optimization is needed
+        if (relevantMemories.length > 100) {
+          await optimizeMemories(memoryService, state.userId);
+        }
 
         const responseText = response.response.text();
 
