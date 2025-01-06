@@ -1,160 +1,163 @@
 # mem0_bridge.py
+
 import os
 import json
 import logging
 import sys
-import google.generativeai as genai
+from datetime import datetime
 from typing import Dict, List, Any, Optional
+import google.generativeai as genai
+from pymilvus import connections, Collection, utility
+from neo4j import GraphDatabase
 
 # Set up logging
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
-class Mem0Bridge:
-    def __init__(self):
-        """Initialize the Mem0Bridge with configuration and memory system."""
-        try:
-            # Check required environment variables
-            required_env_vars = [
-                "MILVUS_URL",
-                "MILVUS_TOKEN",
-                "NEO4J_URL",
-                "NEO4J_USER",
-                "NEO4J_PASSWORD",
-                "GOOGLE_API_KEY"
-            ]
-            
-            missing_vars = [var for var in required_env_vars if not os.getenv(var)]
-            if missing_vars:
-                raise ValueError(f"Missing required environment variables: {', '.join(missing_vars)}")
+class Memory:
+    def __init__(self, config):
+        """Initialize Memory with configuration."""
+        self.config = config
+        
+        # Initialize Milvus
+        connections.connect(
+            alias="default",
+            uri=config["vector_store"]["config"]["url"],
+            token=config["vector_store"]["config"]["token"]
+        )
+        
+        # Initialize Neo4j
+        self.neo4j_driver = GraphDatabase.driver(
+            config["graph_store"]["config"]["url"],
+            auth=(
+                config["graph_store"]["config"]["username"],
+                config["graph_store"]["config"]["password"]
+            )
+        )
+        
+        # Initialize Google AI
+        genai.configure(api_key=config["llm"]["config"]["api_key"])
+        self.model = genai.GenerativeModel(config["llm"]["config"]["model"])
 
-            # Configuration for Google Gen AI, Milvus, Neo4j and Jina
-            self.config = {
-                "vector_store": {
-                    "provider": "milvus",
-                    "config": {
-                        "collection_name": "aivy_memories",
-                        "url": os.getenv("MILVUS_URL"),
-                        "embedding_model_dims": 768,  # For Jina embeddings
-                        "token": os.getenv("MILVUS_TOKEN"),
-                        "metric_type": "L2"
-                    }
-                },
-                "graph_store": {  # Neo4j configuration
-                    "provider": "neo4j",
-                    "config": {
-                        "url": os.getenv("NEO4J_URL"),
-                        "username": os.getenv("NEO4J_USER"),
-                        "password": os.getenv("NEO4J_PASSWORD")
-                    }
-                },
-                "llm": {
-                    "provider": "google",
-                    "config": {
-                        "api_key": os.getenv("GOOGLE_API_KEY"),
-                        "model": "gemini-pro",
-                        "temperature": 0.1,
-                        "max_tokens": 2000,
-                    }
-                },
-                "embedder": {
-                    "provider": "jina",
-                    "config": {
-                        "model": "jina-embeddings-v2-base-en",
-                        "embedding_dims": 768
-                    }
-                },
-                "version": "v1.1"
-            }
-            
-            # Initialize Google Gen AI
-            genai.configure(api_key=self.config["llm"]["config"]["api_key"])
-            
-            # Initialize memory system
-            self.memory = Memory.from_config(self.config)
-            logger.info("Memory system initialized successfully")
-            
-        except Exception as e:
-            logger.error(f"Failed to initialize Memory system: {str(e)}")
-            self.memory = None
-            raise
-
-    def add_memory(self, content: str, user_id: str, metadata: Optional[Dict] = None) -> Dict:
+    def add(self, messages: List[Dict], user_id: str, metadata: Optional[Dict] = None) -> Dict:
         """Add a new memory."""
         try:
-            messages = [{"role": "user", "content": content}]
-            result = self.memory.add(
-                messages=messages,
+            # Create collection if it doesn't exist
+            collection_name = self.config["vector_store"]["config"]["collection_name"]
+            if not utility.has_collection(collection_name):
+                # Initialize collection with proper schema
+                # (Add your collection creation logic here)
+                pass
+                
+            collection = Collection(collection_name)
+            
+            # Process messages and create embeddings
+            content = " ".join([msg["content"] for msg in messages])
+            embedding = self._create_embedding(content)
+            
+            # Store in Milvus
+            memory_id = self._store_in_milvus(collection, embedding, content, user_id, metadata)
+            
+            # Store in Neo4j
+            self._store_in_neo4j(memory_id, user_id, content, metadata)
+            
+            return {
+                "success": True,
+                "memory_id": memory_id,
+                "user_id": user_id,
+                "metadata": metadata
+            }
+            
+        except Exception as e:
+            logger.error(f"Error adding memory: {str(e)}")
+            return {"success": False, "error": str(e)}
+
+    def search(self, query: str, user_id: str, limit: int = 10) -> List[Dict]:
+        """Search for memories."""
+        try:
+            collection = Collection(self.config["vector_store"]["config"]["collection_name"])
+            
+            # Create query embedding
+            query_embedding = self._create_embedding(query)
+            
+            # Search in Milvus
+            search_params = {
+                "metric_type": self.config["vector_store"]["config"]["metric_type"],
+                "params": {"nprobe": 10},
+            }
+            
+            results = collection.search(
+                data=[query_embedding],
+                anns_field="embedding",
+                param=search_params,
+                limit=limit,
+                expr=f'user_id == "{user_id}"'
+            )
+            
+            # Format results
+            memories = []
+            for hits in results:
+                for hit in hits:
+                    memories.append({
+                        "id": hit.id,
+                        "content": hit.entity.get("content"),
+                        "score": hit.score,
+                        "metadata": hit.entity.get("metadata", {})
+                    })
+                    
+            return memories
+            
+        except Exception as e:
+            logger.error(f"Error searching memories: {str(e)}")
+            return []
+
+    def delete(self, memory_id: str, user_id: str) -> Dict:
+        """Delete a memory."""
+        try:
+            # Delete from Milvus
+            collection = Collection(self.config["vector_store"]["config"]["collection_name"])
+            collection.delete(f'memory_id == "{memory_id}" && user_id == "{user_id}"')
+            
+            # Delete from Neo4j
+            with self.neo4j_driver.session() as session:
+                session.run(
+                    "MATCH (m:Memory {id: $memory_id, user_id: $user_id}) "
+                    "DETACH DELETE m",
+                    memory_id=memory_id,
+                    user_id=user_id
+                )
+                
+            return {"success": True}
+            
+        except Exception as e:
+            logger.error(f"Error deleting memory: {str(e)}")
+            return {"success": False, "error": str(e)}
+
+    def _create_embedding(self, text: str) -> List[float]:
+        """Create embedding using Google AI."""
+        response = self.model.embed_content(text=text)
+        return response.embedding
+
+    def _store_in_milvus(self, collection, embedding, content, user_id, metadata):
+        """Store memory in Milvus."""
+        memory_id = str(uuid.uuid4())
+        collection.insert([{
+            "memory_id": memory_id,
+            "user_id": user_id,
+            "content": content,
+            "embedding": embedding,
+            "metadata": metadata
+        }])
+        return memory_id
+
+    def _store_in_neo4j(self, memory_id, user_id, content, metadata):
+        """Store memory in Neo4j."""
+        with self.neo4j_driver.session() as session:
+            session.run(
+                "CREATE (m:Memory {id: $memory_id, user_id: $user_id, "
+                "content: $content, metadata: $metadata})",
+                memory_id=memory_id,
                 user_id=user_id,
+                content=content,
                 metadata=metadata
             )
-            logger.debug(f"Memory added successfully: {result}")
-            return result
-        except Exception as e:
-            error_msg = f"Error adding memory: {str(e)}"
-            logger.error(error_msg)
-            return {"success": False, "error": error_msg}
-
-    def search_memories(self, query: str, user_id: str, limit: int = 10) -> Dict:
-        """Search memories based on query."""
-        try:
-            results = self.memory.search(
-                query=query,
-                user_id=user_id,
-                limit=limit
-            )
-            logger.debug(f"Search completed successfully: {len(results)} results found")
-            return {"success": True, "results": results}
-        except Exception as e:
-            error_msg = f"Error searching memories: {str(e)}"
-            logger.error(error_msg)
-            return {"success": False, "error": error_msg}
-
-    def delete_memory(self, memory_id: str, user_id: str) -> Dict:
-        """Delete a specific memory."""
-        try:
-            result = self.memory.delete(memory_id=memory_id, user_id=user_id)
-            logger.debug(f"Memory deleted successfully: {result}")
-            return {"success": True, "result": result}
-        except Exception as e:
-            error_msg = f"Error deleting memory: {str(e)}"
-            logger.error(error_msg)
-            return {"success": False, "error": error_msg}
-
-# [Previous Memory class implementation remains the same]
-# ... (Keep the existing Memory class implementation)
-
-if __name__ == "__main__":
-    logger.debug(f"Script started with arguments: {sys.argv}")
-    
-    if len(sys.argv) < 3:
-        error_result = {"error": "Insufficient arguments"}
-        print(json.dumps(error_result))
-        sys.exit(1)
-
-    command = sys.argv[1]
-    try:
-        args = json.loads(sys.argv[2])
-        logger.debug(f"Parsed command: {command}, args: {args}")
-        
-        bridge = Mem0Bridge()
-        
-        if command == "add":
-            result = bridge.add_memory(args["content"], args["userId"], args.get("metadata"))
-            print(json.dumps(result))
-        elif command == "search":
-            result = bridge.search_memories(args["query"], args["userId"], args.get("limit", 10))
-            print(json.dumps(result))
-        elif command == "delete":
-            result = bridge.delete_memory(args["memoryId"], args["userId"])
-            print(json.dumps(result))
-        else:
-            error_result = {"error": f"Unknown command: {command}"}
-            print(json.dumps(error_result))
-            
-    except json.JSONDecodeError as e:
-        error_result = {"error": f"Invalid JSON arguments: {str(e)}"}
-        print(json.dumps(error_result))
-    except Exception as e:
-        error_result = {"error": str(e)}
-        print(json.dumps(error_result))
