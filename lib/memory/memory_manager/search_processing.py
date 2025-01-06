@@ -1,97 +1,30 @@
-import logging
-from typing import List, Dict, Optional
-from langchain.prompts import ChatPromptTemplate
-
-logger = logging.getLogger(__name__)
+from typing import Dict, List
+from langchain.prompts import PromptTemplate
 
 class SearchProcessing:
-    async def _search_graph_db(self, query: str, user_id: str) -> List[Dict]:
-        """Search Neo4j graph database"""
-        try:
-            # Extract entities from query
-            query_entities = await self._extract_entities(query)
-            
-            # Create Neo4j search query
-            search_query = """
-            MATCH (m:Memory {user_id: $user_id})-[:CONTAINS]->(e:Entity)
-            WHERE e.name IN $entity_names
-            WITH m, collect(e.name) as entities
-            RETURN m.content as content, 
-                   m.timestamp as timestamp,
-                   entities,
-                   size(entities) as relevance_score
-            ORDER BY relevance_score DESC
-            """
-            
-            results = self.graph.query(
-                search_query,
-                params={
-                    "user_id": user_id,
-                    "entity_names": [e["name"] for e in query_entities]
-                }
-            )
-            
-            return [
-                {
-                    "content": record["content"],
-                    "timestamp": record["timestamp"],
-                    "entities": record["entities"],
-                    "score": record["relevance_score"]
-                }
-                for record in results
-            ]
-        except Exception as e:
-            logger.error(f"Error searching graph DB: {str(e)}")
-            raise
-
-    async def _extract_entities(self, content: str) -> List[Dict]:
-        """Extract entities using LLM"""
-        try:
-            prompt = ChatPromptTemplate.from_messages([
-                ("system", "Extract key entities from the following text. Return as a list of dictionaries with 'name' and 'type' keys."),
-                ("user", content)
-            ])
-            
-            response = await self.llm.agenerate([prompt.format_messages()])
-            entities = response.generations[0][0].text
-            
-            return self._process_entities(entities)
-        except Exception as e:
-            logger.error(f"Error extracting entities: {str(e)}")
-            raise
-
-    def _merge_and_rank_results(self, vector_results: List[Dict], graph_results: List[Dict]) -> List[Dict]:
-        """Merge and rank results from both stores"""
-        try:
-            combined_results = []
-            
-            # Process vector results
-            for vr in vector_results:
-                combined_results.append({
-                    "content": vr["content"],
-                    "source": "vector",
-                    "score": vr["score"],
-                    "metadata": vr["metadata"],
-                    "timestamp": vr["metadata"].get("timestamp", "")
-                })
-            
-            # Process graph results
-            for gr in graph_results:
-                combined_results.append({
-                    "content": gr["content"],
-                    "source": "graph",
-                    "entities": gr["entities"],
-                    "score": gr["score"] / 10,  # Normalize graph scores
-                    "timestamp": gr["timestamp"]
-                })
-            
-            # Sort by score and timestamp
-            combined_results.sort(
-                key=lambda x: (x["score"], x["timestamp"]), 
-                reverse=True
-            )
-            
-            return combined_results
-        except Exception as e:
-            logger.error(f"Error merging results: {str(e)}")
-            raise
+    def __init__(self, config: Dict):
+        self.mem0 = config.mem0
+        self.vector_store = config.vector_store
+        self.search_prompt = PromptTemplate(
+            template="Search Query: {query}\nContext: {context}\nRelevant Information:",
+            input_variables=["query", "context"]
+        )
+        
+    async def search(self, query: str, filters: Dict = None):
+        """Hybrid search implementation"""
+        vector_results = await self._search_vectors(query)
+        mem0_results = await self.mem0.search(query=query, filters=filters)
+        
+        combined_results = self._merge_results(vector_results, mem0_results)
+        return self._rank_results(combined_results, query)
+        
+    async def _search_vectors(self, query: str):
+        return self.vector_store.similarity_search(query)
+        
+    def _merge_results(self, vector_results: List, mem0_results: List):
+        # Implement Mem0's merging logic
+        return self.mem0.utils.merge_results(vector_results, mem0_results)
+        
+    def _rank_results(self, results: List, query: str):
+        # Implement Mem0's ranking system
+        return self.mem0.utils.rank_results(results, query)

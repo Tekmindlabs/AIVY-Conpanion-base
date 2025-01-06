@@ -1,99 +1,30 @@
-import logging
-from datetime import datetime, timedelta
-from typing import Dict, Any, List
-import asyncio
+from typing import Dict, Any
+from mem0.memory.telemetry import capture_event
 
-logger = logging.getLogger(__name__)
-
-class MemoryCoreFunctions:
-    async def cleanup_old_memories(self, user_id: str, days_old: int = 30) -> None:
-        """Remove memories older than specified days"""
-        try:
-            cutoff_date = datetime.now() - timedelta(days=days_old)
-            
-            # Clean vector store
-            await self.vector_store.delete(
-                f"metadata.timestamp < '{cutoff_date.isoformat()}' AND metadata.user_id = '{user_id}'"
-            )
-            
-            # Clean Neo4j
-            cleanup_query = """
-            MATCH (m:Memory {user_id: $user_id})
-            WHERE m.timestamp < $cutoff_date
-            DETACH DELETE m
-            """
-            self.graph.query(cleanup_query, {
-                "user_id": user_id,
-                "cutoff_date": cutoff_date.isoformat()
-            })
-            
-            logger.info(f"Cleaned up old memories for user {user_id}")
-        except Exception as e:
-            logger.error(f"Error cleaning up memories: {str(e)}")
-            raise
-
-    async def get_memory_stats(self, user_id: str) -> Dict[str, Any]:
-        """Get memory usage statistics"""
-        try:
-            vector_count = await self.vector_store.count(
-                filter=f"metadata.user_id = '{user_id}'"
-            )
-            
-            stats_query = """
-            MATCH (m:Memory {user_id: $user_id})
-            RETURN count(m) as memory_count,
-                   count(()-[:CONTAINS]->()) as relationship_count
-            """
-            graph_stats = self.graph.query(stats_query, {"user_id": user_id})[0]
-            
-            return {
-                "vector_memories": vector_count,
-                "graph_memories": graph_stats["memory_count"],
-                "relationships": graph_stats["relationship_count"]
-            }
-        except Exception as e:
-            logger.error(f"Error getting memory stats: {str(e)}")
-            raise
-
-    async def health_check(self) -> Dict[str, bool]:
-        """Check health of all components"""
-        status = {
-            "vector_store": False,
-            "graph_db": False,
-            "llm": False,
-            "embeddings": False
-        }
+class CoreFunctions:
+    def __init__(self, config: Dict):
+        self.config = config
+        self.mem0 = config.mem0
         
+    async def perform_operation(self, operation: str, **kwargs):
+        """Execute core operations with telemetry"""
         try:
-            # Check each component
-            await self._check_vector_store(status)
-            await self._check_graph_db(status)
-            await self._check_llm(status)
-            await self._check_embeddings(status)
-            
+            capture_event(f"mem0.{operation}", self, kwargs)
+            if operation == "add":
+                return await self._add_memory(**kwargs)
+            elif operation == "search":
+                return await self._search_memory(**kwargs)
+            elif operation == "update":
+                return await self._update_memory(**kwargs)
         except Exception as e:
-            logger.error(f"Health check failed: {str(e)}")
+            capture_event(f"mem0.error.{operation}", self, {"error": str(e)})
+            raise
             
-        return status
-
-    def _process_entities(self, entities_text: str) -> List[Dict]:
-        """Process and validate extracted entities"""
-        try:
-            if isinstance(entities_text, str):
-                import ast
-                entities = ast.literal_eval(entities_text)
-            else:
-                entities = entities_text
-                
-            validated_entities = []
-            for entity in entities:
-                if isinstance(entity, dict) and "name" in entity and "type" in entity:
-                    validated_entities.append({
-                        "name": str(entity["name"]),
-                        "type": str(entity["type"])
-                    })
-                    
-            return validated_entities
-        except Exception as e:
-            logger.error(f"Error processing entities: {str(e)}")
-            return []
+    async def _add_memory(self, content: str, metadata: Dict[str, Any]):
+        return await self.mem0.add(content=content, metadata=metadata)
+        
+    async def _search_memory(self, query: str, filters: Dict = None):
+        return await self.mem0.search(query=query, filters=filters)
+        
+    async def _update_memory(self, memory_id: str, content: str):
+        return await self.mem0.update(memory_id=memory_id, content=content)
