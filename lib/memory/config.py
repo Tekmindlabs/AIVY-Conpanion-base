@@ -1,24 +1,20 @@
-# config.py
-DEFAULT_CONFIG = {
-    "llm": {
-        "provider": "google",
-        "model_name": "gemini-pro",
-        "api_key": "your_google_api_key",
-        "temperature": 0.7
+const DEFAULT_CONFIG = {
+    milvus: {
+        url: "http://localhost:19530",
+        collection_name: "mem0",
+        embedding_model_dims: 1536,
+        metric_type: "L2"
     },
-    "embeddings": {
-        "provider": "jina",
-        "api_key": "your_jina_api_key",
-        "model_name": "jina-embeddings-v2"
+    neo4j: {
+        url: "bolt://localhost:7687",
+        username: "neo4j",
+        password: "password"
     },
-    "milvus": {
-        "host": "localhost",
-        "port": 19530,
-        "collection_name": "memories"
+    llm: {
+        model_name: "google/gemini-pro",
+        temperature: 0.7
     },
-    "neo4j": {
-        "url": "bolt://localhost:7687",
-        "username": "neo4j",
-        "password": "your_password"
+    embeddings: {
+        model_name: "jina-embeddings-v2"
     }
 }
