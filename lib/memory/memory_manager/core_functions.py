@@ -1,30 +1,50 @@
-from typing import Dict, Any
-from mem0.memory.telemetry import capture_event
-
-class CoreFunctions:
+class MemoryCoreFunctions:
     def __init__(self, config: Dict):
         self.config = config
-        self.mem0 = config.mem0
+        self.mem0 = config['mem0']
+        # Add new components
+        self.context_manager = MemoryContextManager()
+        self.validator = MemoryValidator()
+        self.cache = MemoryCache()
         
     async def perform_operation(self, operation: str, **kwargs):
-        """Execute core operations with telemetry"""
         try:
-            capture_event(f"mem0.{operation}", self, kwargs)
-            if operation == "add":
-                return await self._add_memory(**kwargs)
-            elif operation == "search":
-                return await self._search_memory(**kwargs)
-            elif operation == "update":
-                return await self._update_memory(**kwargs)
-        except Exception as e:
-            capture_event(f"mem0.error.{operation}", self, {"error": str(e)})
-            raise
+            # Validate input
+            if 'content' in kwargs:
+                validation_result = self.validator.validate_memory(
+                    kwargs['content'], 
+                    kwargs.get('metadata', {})
+                )
+                if not validation_result['is_valid']:
+                    raise ValueError(validation_result['error'])
+                    
+            # Check cache first
+            if operation == 'search':
+                cached_result = await self.cache.get_cached_memory(
+                    kwargs.get('query')
+                )
+                if cached_result:
+                    return cached_result
+                    
+            # Update context
+            if operation == 'add':
+                await self.context_manager.manage_context([{
+                    'content': kwargs['content'],
+                    'metadata': kwargs.get('metadata', {})
+                }])
+                
+            # Perform original operation
+            result = await super().perform_operation(operation, **kwargs)
             
-    async def _add_memory(self, content: str, metadata: Dict[str, Any]):
-        return await self.mem0.add(content=content, metadata=metadata)
-        
-    async def _search_memory(self, query: str, filters: Dict = None):
-        return await self.mem0.search(query=query, filters=filters)
-        
-    async def _update_memory(self, memory_id: str, content: str):
-        return await self.mem0.update(memory_id=memory_id, content=content)
+            # Cache results if applicable
+            if operation == 'search':
+                await self.cache.cache_memory(
+                    kwargs.get('query'),
+                    result
+                )
+                
+            return result
+            
+        except Exception as e:
+            capture_event(f"error.memory.{operation}", {"error": str(e)})
+            raise
