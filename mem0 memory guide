@@ -231,4 +231,3 @@ export async function POST(req: Request) {
    - Implement proper indexing in the vector store
    - Use appropriate batch sizes for memory operations
 
-This guide serves as a comprehensive reference for implementing and maintaining Mem0 in the Aivy Tutor system. Keep it updated as the system evolves and new features are added.
