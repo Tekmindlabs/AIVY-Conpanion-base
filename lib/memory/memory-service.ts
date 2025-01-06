@@ -11,15 +11,26 @@ export interface MemoryContent {
   metadata?: Record<string, any>;
 }
 
+export interface MemoryResult {
+  id: string;
+  userId: string;
+  contentType: string;
+  metadata: Record<string, any>;
+}
+
 export class MemoryService {
   private memory = getMem0Client();
   private milvus = getMilvusClient();
   private neo4j: Neo4jDriver;
 
   constructor() {
+    if (!process.env.NEO4J_URL || !process.env.NEO4J_USER || !process.env.NEO4J_PASSWORD) {
+      throw new Error('Neo4j configuration missing');
+    }
+    
     this.neo4j = Neo4jDriver.driver(
-      process.env.NEO4J_URL!,
-      Neo4jDriver.auth.basic(process.env.NEO4J_USER!, process.env.NEO4J_PASSWORD!)
+      process.env.NEO4J_URL,
+      Neo4jDriver.auth.basic(process.env.NEO4J_USER, process.env.NEO4J_PASSWORD)
     );
   }
 
@@ -29,6 +40,7 @@ export class MemoryService {
     content,
     metadata = {}
   }: MemoryContent): Promise<MemoryResult> {
+    const session = this.neo4j.session();
     try {
       const enrichedMetadata = {
         ...metadata,
@@ -44,26 +56,49 @@ export class MemoryService {
         enrichedMetadata
       );
 
-      // Store in Neo4j for relationship tracking
-      const session = this.neo4j.session();
+      if (!result.success) {
+        throw new Error(result.error || 'Failed to add memory');
+      }
+
+      // Store in Neo4j with relationships
       await session.run(
-        `CREATE (m:Memory {
+        `
+        CREATE (m:Memory {
           userId: $userId,
           contentId: $contentId,
           content: $content,
           contentType: $contentType,
           timestamp: datetime()
-        })`,
+        })
+        WITH m
+        MATCH (u:User {id: $userId})
+        CREATE (u)-[:CREATED]->(m)
+        `,
         {
           userId,
           contentId: enrichedMetadata.content_id,
           content,
-          contentType
+          contentType,
+          metadata: JSON.stringify(enrichedMetadata)
         }
       );
 
-      if (!result.success) {
-        throw new Error(result.error || 'Failed to add memory');
+      // Create relationships if specified in metadata
+      if (metadata.relationships) {
+        for (const relationship of metadata.relationships) {
+          await session.run(
+            `
+            MATCH (m1:Memory {contentId: $sourceId})
+            MATCH (m2:Memory {contentId: $targetId})
+            CREATE (m1)-[:${relationship.type} {metadata: $metadata}]->(m2)
+            `,
+            {
+              sourceId: enrichedMetadata.content_id,
+              targetId: relationship.targetId,
+              metadata: JSON.stringify(relationship.metadata || {})
+            }
+          );
+        }
       }
 
       return {
@@ -75,6 +110,8 @@ export class MemoryService {
     } catch (error) {
       console.error('Error adding memory:', error);
       throw new Error('Failed to add memory');
+    } finally {
+      await session.close();
     }
   }
 
@@ -83,54 +120,70 @@ export class MemoryService {
       throw new Error('Query and userId are required for searching memories');
     }
 
+    const session = this.neo4j.session();
     try {
       // Search in Mem0/Milvus
       const vectorResult = await this.memory.search(query, userId, limit);
       
-      // Search in Neo4j
-      const session = this.neo4j.session();
+      // Enhanced Neo4j search with relationship context
       const graphResult = await session.run(
-        `MATCH (m:Memory)
-         WHERE m.userId = $userId
-         WITH m
-         ORDER BY m.timestamp DESC
-         LIMIT $limit
-         RETURN m`,
+        `
+        MATCH (m:Memory {userId: $userId})
+        WITH m
+        OPTIONAL MATCH (m)-[r]-(related)
+        WITH m, collect(related) as relatedNodes
+        RETURN m, relatedNodes
+        ORDER BY m.timestamp DESC
+        LIMIT $limit
+        `,
         { userId, limit }
       );
 
       const memories = vectorResult?.results?.results || [];
-      const graphMemories = graphResult.records.map(record => record.get('m').properties);
+      const graphMemories = graphResult.records.map(record => ({
+        ...record.get('m').properties,
+        relationships: record.get('relatedNodes').map((node: any) => node.properties)
+      }));
 
-      // Combine and deduplicate results
+      // Combine and deduplicate results with relationship context
       const combinedResults = [...memories, ...graphMemories];
       const uniqueResults = Array.from(new Set(combinedResults.map(m => m.contentId)))
-        .map(id => combinedResults.find(m => m.contentId === id));
+        .map(id => {
+          const memory = combinedResults.find(m => m.contentId === id);
+          return {
+            id: memory.contentId || memory.id,
+            userId: memory.userId,
+            content: memory.content,
+            messages: memory.metadata?.messages || [],
+            timestamp: memory.metadata?.timestamp || memory.timestamp,
+            metadata: memory.metadata || {},
+            relationships: memory.relationships || []
+          };
+        });
 
-      return uniqueResults.map(entry => ({
-        id: entry.contentId || entry.id,
-        userId: entry.userId,
-        messages: entry.metadata?.messages || [],
-        timestamp: entry.metadata?.timestamp || entry.timestamp,
-        metadata: entry.metadata || {}
-      }));
+      return uniqueResults;
 
     } catch (error) {
       console.error('Error searching memories:', error);
       throw new Error('Failed to search memories');
+    } finally {
+      await session.close();
     }
   }
 
   async deleteMemory(userId: string, memoryId: string): Promise<boolean> {
+    const session = this.neo4j.session();
     try {
       // Delete from Mem0/Milvus
       const result = await this.memory.delete(userId, memoryId);
 
-      // Delete from Neo4j
-      const session = this.neo4j.session();
+      // Delete from Neo4j with relationship cleanup
       await session.run(
-        `MATCH (m:Memory {userId: $userId, contentId: $memoryId})
-         DELETE m`,
+        `
+        MATCH (m:Memory {userId: $userId, contentId: $memoryId})
+        OPTIONAL MATCH (m)-[r]-()
+        DELETE r, m
+        `,
         { userId, memoryId }
       );
 
@@ -138,10 +191,16 @@ export class MemoryService {
     } catch (error) {
       console.error('Error deleting memory:', error);
       throw new Error('Failed to delete memory');
+    } finally {
+      await session.close();
     }
   }
 
   async close() {
-    await this.neo4j.close();
+    try {
+      await this.neo4j.close();
+    } catch (error) {
+      console.error('Error closing Neo4j connection:', error);
+    }
   }
 }
