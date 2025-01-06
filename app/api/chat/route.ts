@@ -9,7 +9,7 @@ import { AgentState, ReActStep, EmotionalState } from '@/lib/ai/agents';
 import { Message } from '@/types/chat';
 import { MemoryService } from '@/lib/memory/memory-service';
 import { EmbeddingModel } from '@/lib/knowledge/embeddings';
-import { MemoryTools } from '@/lib/memory/memory-tools';
+
 
 // Type definitions
 interface MemorySearchResponse {
@@ -76,7 +76,6 @@ if (!process.env.GOOGLE_AI_API_KEY) {
 
 const genAI = new GoogleGenerativeAI(process.env.GOOGLE_AI_API_KEY);
 const memoryService = new MemoryService();
-const memoryTools = new MemoryTools(memoryService);
 const requestCache = new Map<string, Response>();
 
 export async function POST(req: NextRequest) {
@@ -134,33 +133,35 @@ export async function POST(req: NextRequest) {
       content: msg.content.trim()
     }));
 
-    const lastMessage = processedMessages[processedMessages.length - 1];
-    if (!lastMessage?.content) {
-      return new Response(
-        JSON.stringify({ error: "Invalid last message" }), 
-        { status: 400, headers: { 'Content-Type': 'application/json' } }
-      );
-    }
+    // After processing messages and getting the last message
+const lastMessage = processedMessages[processedMessages.length - 1];
+if (!lastMessage?.content) {
+  return new Response(
+    JSON.stringify({ error: "Invalid last message" }), 
+    { status: 400, headers: { 'Content-Type': 'application/json' } }
+  );
+}
 
-    // Search relevant memories
-    currentStep = STEPS.MEMORY_SEARCH;
-    const relevantMemories = await memoryService.searchMemories(
-      lastMessage.content,
-      user.id,
-      5
-    ).catch(error => {
-      console.warn('Memory search failed:', error);
-      return [];
-    });
+// Search relevant memories
+currentStep = STEPS.MEMORY_SEARCH;
+const relevantMemories = await memoryService.searchMemories(
+  lastMessage.content,
+  user.id,
+  5
+).catch(error => {
+  console.warn('Memory search failed:', error);
+  return [];
+});
 
-    const memoryContext = relevantMemories
-      .map(memory => `Previous interaction: ${memory.content}`)
-      .join('\n');
+// Create memory context string
+const memoryContext = relevantMemories
+  .map(memory => `Previous interaction: ${memory.content}`)
+  .join('\n');
 
-    // Generate embeddings
-    currentStep = STEPS.EMBED;
-    const embeddingResult = await EmbeddingModel.generateEmbedding(lastMessage.content);
-    const embedding = Array.from(embeddingResult);
+// Generate embeddings
+currentStep = STEPS.EMBED;
+const embeddingResult = await EmbeddingModel.generateEmbedding(lastMessage.content);
+const embedding = Array.from(embeddingResult);
     
     const processedTensors = {
       embedding: embedding,
@@ -190,7 +191,8 @@ export async function POST(req: NextRequest) {
         role: 'companion',
         analysis: {},
         recommendations: "",
-        previousMemories: relevantMemories,
+        previousMemories: relevantMemories, // Add memories here
+        memoryContext: memoryContext,       // Add memory context
         personalPreferences: {
           interests: user.interests || [],
           communicationStyle: 'default',
@@ -206,29 +208,35 @@ export async function POST(req: NextRequest) {
         }
       },
       reactSteps: [],
-      processedTensors
+      processedTensors: {
+        embedding: embedding,
+        input_ids: new Float32Array(embedding.length).fill(0),
+        attention_mask: new Float32Array(embedding.length).fill(1),
+        token_type_ids: new Float32Array(embedding.length).fill(0)
+      }
     };
 
     const response = await hybridAgent.process(initialState);
-    if (!response.success) {
-      throw new Error(response.error || "Processing failed");
-    }
+if (!response.success) {
+  throw new Error(response.error || "Processing failed");
+}
 
-    // Store memory
-    await memoryService.addMemory({
-      userId: user.id,
-      contentType: 'conversation',
-      content: lastMessage.content,
-      metadata: {
-        messages: processedMessages,
-        embedding: embedding,
-        emotionalState: response.emotionalState,
-        reactStep: response.reactSteps?.[response.reactSteps.length - 1],
-        context: initialState.context,
-        content_type: 'conversation',
-        timestamp: new Date().toISOString()
-      }
-    });
+// Store memory
+currentStep = STEPS.MEMORY_STORE;
+await memoryService.addMemory({
+  userId: user.id,
+  contentType: 'conversation',
+  content: lastMessage.content,
+  metadata: {
+    messages: processedMessages,
+    embedding: embedding,
+    emotionalState: response.emotionalState,
+    reactStep: response.reactSteps?.[response.reactSteps.length - 1],
+    context: initialState.context,
+    content_type: 'conversation',
+    timestamp: new Date().toISOString()
+  }
+});
 
     // Generate personalized response
     currentStep = STEPS.RESPONSE;
@@ -267,7 +275,12 @@ export async function POST(req: NextRequest) {
       },
       memoryContext: {
         relevantMemoriesCount: relevantMemories.length,
-        memoryId: runId
+        memoryId: runId,
+        memories: relevantMemories.map(mem => ({
+          id: mem.id,
+          content: mem.content,
+          timestamp: mem.metadata?.timestamp
+        }))
       }
     };
 
@@ -306,7 +319,8 @@ export async function POST(req: NextRequest) {
         success: false,
         error: error instanceof Error ? error.message : "Unknown error",
         details: `Failed during ${currentStep}`,
-        stack: error instanceof Error ? error.stack : undefined
+        stack: error instanceof Error ? error.stack : undefined,
+        step: currentStep
       }),
       { 
         status: 500,

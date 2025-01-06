@@ -1,3 +1,5 @@
+// lib/ai/hybrid-agent.ts
+
 import { v4 as uuidv4 } from 'uuid';
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { createEmotionalAgent } from "./emotional-agent";
@@ -8,14 +10,14 @@ import { MemoryTools } from "../memory/memory-tools";
 import { createRelationship, findRelatedContent } from '@/lib/milvus/knowledge-graph';
 
 // Define base interfaces
-interface ReActStep {
+export interface ReActStep {
   thought: string;
   action: string;
   observation: string;
   response?: string;
 }
 
-interface Memory {
+export interface Memory {
   id: string;
   content: string;
   emotionalState: EmotionalState;
@@ -64,6 +66,7 @@ export interface HybridState extends AgentState {
     };
     recommendations: string;
     previousMemories?: Memory[];
+    memoryContext?: string;
     personalPreferences: {
       interests?: string[];
       communicationStyle?: string;
@@ -86,7 +89,7 @@ export interface HybridState extends AgentState {
   };
 }
 
-interface HybridResponse {
+export interface HybridResponse {
   success: boolean;
   emotionalState?: EmotionalState;
   reactSteps?: ReActStep[];
@@ -113,7 +116,7 @@ const optimizeMemories = async (memoryService: MemoryService, userId: string) =>
     return acc;
   }, {} as Record<string, Memory[]>);
 
-  // Merge similar memories from same day
+  // Memory optimization logic can be implemented here
   for (const [date, memories] of Object.entries(grouped)) {
     if (memories.length > 10) {
       // Implement memory consolidation logic here
@@ -145,8 +148,8 @@ export const createHybridAgent = (model: any, memoryService: MemoryService) => {
       .map(h => `${h.mood} (${h.timestamp})`)
       .join(' -> ');
   
-    const memoryContext = (memories as Memory[])
-      .map((memory: Memory) => ({
+    const memoryContext = memories
+      .map(memory => ({
         content: memory.content,
         emotion: memory.emotionalState?.mood,
         timestamp: memory.timestamp,
@@ -233,7 +236,6 @@ export const createHybridAgent = (model: any, memoryService: MemoryService) => {
           }
         });
 
-        // Update emotional history
         state.emotionalHistory = [
           ...(state.emotionalHistory || []),
           {
@@ -261,7 +263,7 @@ export const createHybridAgent = (model: any, memoryService: MemoryService) => {
         const newMemory = {
           userId: state.userId,
           content: lastMessage.content,
-          contentType: 'conversation', // Add this line
+          contentType: 'conversation',
           metadata: {
             messages: [createMessage(lastMessage.content, 'user')],
             emotionalState: emotionalAnalysis.emotionalState,
@@ -273,7 +275,6 @@ export const createHybridAgent = (model: any, memoryService: MemoryService) => {
 
         const savedMemory = await memoryService.addMemory(newMemory);
 
-        // Create relationships between related memories
         await Promise.all(relevantMemories.map(async (relatedMemory) => {
           await createRelationship({
             userId: state.userId,
@@ -295,7 +296,6 @@ export const createHybridAgent = (model: any, memoryService: MemoryService) => {
         state.context.relationshipDynamics.connectionStrength = 
           calculateConnectionStrength(state.context.relationshipDynamics);
 
-        // Check if memory optimization is needed
         if (relevantMemories.length > 100) {
           await optimizeMemories(memoryService, state.userId);
         }
