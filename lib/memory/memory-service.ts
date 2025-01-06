@@ -72,33 +72,53 @@ export class MemoryService {
     }
   }
 
-  // memory-service.ts
-// memory-service.ts
-export class MemoryService {
-  private memory = getMem0Client();
-
-  async searchMemories(query: string, userId: string, limit: number = 5) {
+  async searchMemories(query: string, userId: string, limit: number = 5): Promise<any[]> {
     if (!query || !userId) {
       throw new Error('Query and userId are required for searching memories');
     }
-
+  
     try {
       const result = await this.memory.search(query, userId, limit);
       
-      if (!result || !result.results) {
+      // Check if result exists and has the correct structure
+      if (!result?.success || !result?.results?.results) {
         return [];
       }
-
-      return result.results.map(entry => ({
-        id: entry.id || entry.content_id,
+  
+      // Access the nested results array
+      const memories = result.results.results;
+      
+      // Return empty array if no memories found
+      if (!Array.isArray(memories)) {
+        return [];
+      }
+  
+      // Map the memories to the expected format
+      return memories.map(entry => ({
+        id: entry.content_id || entry.id,
         userId: entry.user_id,
         messages: entry.metadata?.messages || [],
-        timestamp: entry.created_at || new Date().toISOString(),
+        timestamp: entry.metadata?.timestamp || new Date().toISOString(),
         metadata: entry.metadata || {}
       }));
+  
     } catch (error) {
       console.error('Error searching memories:', error);
       throw new Error('Failed to search memories');
+    }
+  }
+
+  async deleteMemory(userId: string, memoryId: string): Promise<boolean> {
+    if (!userId || !memoryId) {
+      throw new Error('UserId and memoryId are required for deleting memory');
+    }
+
+    try {
+      const result = await this.memory.delete(userId, memoryId);
+      return result.success;
+    } catch (error) {
+      console.error('Error deleting memory:', error);
+      throw new Error('Failed to delete memory');
     }
   }
 }

@@ -125,21 +125,26 @@ export const createHybridAgent = (model: any, memoryService: MemoryService) => {
     };
   };
 
+
   return {
     process: async (state: HybridState): Promise<HybridResponse> => {
       try {
         const lastMessage = state.messages[state.messages.length - 1];
-if (!lastMessage?.content) {
-  throw new Error("Invalid message format - content is required");
-}
+        if (!lastMessage?.content) {
+          throw new Error("Invalid message format - content is required");
+        }
 
-const relevantMemories = await memoryService.searchMemories(
-  lastMessage.content,
-  state.userId,
-  5
-);
+        // Search memories with proper error handling
+        const relevantMemories = await memoryService.searchMemories(
+          lastMessage.content,
+          state.userId,
+          5
+        ).catch(error => {
+          console.warn('Memory search failed:', error);
+          return [];
+        });
 
-        // Step 2: Emotional Analysis
+        // Emotional analysis
         const emotionalAnalysis = await emotionalAgent({
           ...state,
           context: {
@@ -147,39 +152,39 @@ const relevantMemories = await memoryService.searchMemories(
             previousMemories: relevantMemories
           }
         });
-        
-        // Step 3: ReAct Planning
+
+        // ReAct Planning
         const reactStep = await executeReActStep(
           state.currentStep,
           state,
           emotionalAnalysis.emotionalState,
           relevantMemories
         );
-        
-        // Step 4: Generate Response
+
+        // Generate response
         const responsePrompt = `
-  Context:
-  - Emotional Analysis: ${JSON.stringify(emotionalAnalysis)}
-  - Conversation History: ${JSON.stringify(reactStep)}
-  - Personal History: ${JSON.stringify(relevantMemories)}
-  
-  User Message: ${lastMessage.content}
-  
-  As a supportive AI companion, generate a response that:
-  1. Shows genuine understanding of emotions and needs
-  2. Maintains a warm and personal connection
-  3. References shared history and previous conversations
-  4. Offers emotional support and encouragement
-  5. Adapts tone and style to user preferences
-  6. Promotes well-being and positive growth
-  
-  Response Guidelines:
-  - Use empathetic and inclusive language
-  - Balance support with respect for autonomy
-  - Include specific references to past interactions
-  - Maintain appropriate emotional boundaries
-  - End with an engaging question or supportive statement
-`;
+          Context:
+          - Emotional Analysis: ${JSON.stringify(emotionalAnalysis)}
+          - Conversation History: ${JSON.stringify(reactStep)}
+          - Personal History: ${JSON.stringify(relevantMemories)}
+          
+          User Message: ${lastMessage.content}
+          
+          As a supportive AI companion, generate a response that:
+          1. Shows genuine understanding of emotions and needs
+          2. Maintains a warm and personal connection
+          3. References shared history and previous conversations
+          4. Offers emotional support and encouragement
+          5. Adapts tone and style to user preferences
+          6. Promotes well-being and positive growth
+          
+          Response Guidelines:
+          - Use empathetic and inclusive language
+          - Balance support with respect for autonomy
+          - Include specific references to past interactions
+          - Maintain appropriate emotional boundaries
+          - End with an engaging question or supportive statement
+        `;
 
         const response = await model.generateContent({
           contents: [{ 
@@ -188,27 +193,28 @@ const relevantMemories = await memoryService.searchMemories(
           }]
         });
 
-        // Step 5: Store interaction
-        // Step 5: Store interaction
-        const memoryEntry = {
-          messages: state.messages.map(msg => ({
-            id: crypto.randomUUID(),
-            content: msg.content,
-            role: msg.role,
-            createdAt: new Date() // Create a Date object directly instead of string
-          })),
+        // Store interaction with proper memory format
+        const memoryContent = {
+          userId: state.userId,
+          contentType: 'conversation',
+          content: lastMessage.content,
           metadata: {
+            messages: state.messages.map(msg => ({
+              content: msg.content,
+              role: msg.role,
+              timestamp: new Date().toISOString()
+            })),
             emotionalState: emotionalAnalysis.emotionalState,
-            context: state.context,
-            reactStep
+            reactStep,
+            context: state.context
           }
         };
 
-await memoryService.addMemory(
-  memoryEntry.messages,
-  state.userId,
-  memoryEntry.metadata
-);
+        // Add memory with proper error handling
+        await memoryService.addMemory(memoryContent).catch(error => {
+          console.error('Error adding memory:', error);
+          // Continue execution even if memory storage fails
+        });
 
         const responseText = response.response.text();
 
