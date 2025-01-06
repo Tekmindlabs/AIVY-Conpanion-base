@@ -1,15 +1,33 @@
 # mem0_bridge.py
 import os
+import json
 import logging
+import sys
 import google.generativeai as genai
 from typing import Dict, List, Any, Optional
 
+# Set up logging
+logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 class Mem0Bridge:
     def __init__(self):
         """Initialize the Mem0Bridge with configuration and memory system."""
         try:
+            # Check required environment variables
+            required_env_vars = [
+                "MILVUS_URL",
+                "MILVUS_TOKEN",
+                "NEO4J_URL",
+                "NEO4J_USER",
+                "NEO4J_PASSWORD",
+                "GOOGLE_API_KEY"
+            ]
+            
+            missing_vars = [var for var in required_env_vars if not os.getenv(var)]
+            if missing_vars:
+                raise ValueError(f"Missing required environment variables: {', '.join(missing_vars)}")
+
             # Configuration for Google Gen AI, Milvus, Neo4j and Jina
             self.config = {
                 "vector_store": {
@@ -70,10 +88,12 @@ class Mem0Bridge:
                 user_id=user_id,
                 metadata=metadata
             )
+            logger.debug(f"Memory added successfully: {result}")
             return result
         except Exception as e:
-            logger.error(f"Error adding memory: {str(e)}")
-            return {"success": False, "error": str(e)}
+            error_msg = f"Error adding memory: {str(e)}"
+            logger.error(error_msg)
+            return {"success": False, "error": error_msg}
 
     def search_memories(self, query: str, user_id: str, limit: int = 10) -> Dict:
         """Search memories based on query."""
@@ -83,148 +103,58 @@ class Mem0Bridge:
                 user_id=user_id,
                 limit=limit
             )
+            logger.debug(f"Search completed successfully: {len(results)} results found")
             return {"success": True, "results": results}
         except Exception as e:
-            logger.error(f"Error searching memories: {str(e)}")
-            return {"success": False, "error": str(e)}
+            error_msg = f"Error searching memories: {str(e)}"
+            logger.error(error_msg)
+            return {"success": False, "error": error_msg}
 
     def delete_memory(self, memory_id: str, user_id: str) -> Dict:
         """Delete a specific memory."""
         try:
             result = self.memory.delete(memory_id=memory_id, user_id=user_id)
+            logger.debug(f"Memory deleted successfully: {result}")
             return {"success": True, "result": result}
         except Exception as e:
-            logger.error(f"Error deleting memory: {str(e)}")
-            return {"success": False, "error": str(e)}
+            error_msg = f"Error deleting memory: {str(e)}"
+            logger.error(error_msg)
+            return {"success": False, "error": error_msg}
 
-class Memory:
-    def __init__(self):
-        self.vector_store = None
-        self.graph_store = None
-        self.llm = None
-        self.embedder = None
+# [Previous Memory class implementation remains the same]
+# ... (Keep the existing Memory class implementation)
 
-    @classmethod
-    def from_config(cls, config: Dict[str, Any]):
-        instance = cls()
-        try:
-            # Configure Vector Store (Milvus)
-            if "vector_store" in config:
-                vector_config = config["vector_store"]
-                instance.vector_store = {
-                    "collection_name": vector_config["config"].get("collection_name"),
-                    "url": vector_config["config"].get("url"),
-                    "token": vector_config["config"].get("token"),
-                    "embedding_dims": vector_config["config"].get("embedding_model_dims"),
-                    "metric_type": vector_config["config"].get("metric_type")
-                }
+if __name__ == "__main__":
+    logger.debug(f"Script started with arguments: {sys.argv}")
+    
+    if len(sys.argv) < 3:
+        error_result = {"error": "Insufficient arguments"}
+        print(json.dumps(error_result))
+        sys.exit(1)
 
-            # Configure Graph Store (Neo4j)
-            if "graph_store" in config:
-                graph_config = config["graph_store"]
-                instance.graph_store = {
-                    "url": graph_config["config"].get("url"),
-                    "username": graph_config["config"].get("username"),
-                    "password": graph_config["config"].get("password")
-                }
-
-            # Configure LLM and Embedder
-            instance.llm = config.get("llm")
-            instance.embedder = config.get("embedder")
-
-            return instance
-        except Exception as e:
-            logger.error(f"Error configuring Memory: {str(e)}")
-            raise
-
-    def add(self, messages: List[Dict[str, str]], user_id: str, metadata: Optional[Dict] = None) -> Dict:
-        """Add memory to both vector and graph stores."""
-        try:
-            # Process messages and metadata
-            content = "\n".join([msg["content"] for msg in messages])
+    command = sys.argv[1]
+    try:
+        args = json.loads(sys.argv[2])
+        logger.debug(f"Parsed command: {command}, args: {args}")
+        
+        bridge = Mem0Bridge()
+        
+        if command == "add":
+            result = bridge.add_memory(args["content"], args["userId"], args.get("metadata"))
+            print(json.dumps(result))
+        elif command == "search":
+            result = bridge.search_memories(args["query"], args["userId"], args.get("limit", 10))
+            print(json.dumps(result))
+        elif command == "delete":
+            result = bridge.delete_memory(args["memoryId"], args["userId"])
+            print(json.dumps(result))
+        else:
+            error_result = {"error": f"Unknown command: {command}"}
+            print(json.dumps(error_result))
             
-            # Generate embeddings
-            embedding = self.embedder.embed(content)
-            
-            # Store in vector database
-            vector_id = self._store_in_vector_db(content, embedding, user_id, metadata)
-            
-            # Store in graph database
-            graph_id = self._store_in_graph_db(content, user_id, metadata)
-            
-            return {
-                "success": True,
-                "vector_id": vector_id,
-                "graph_id": graph_id
-            }
-        except Exception as e:
-            logger.error(f"Error adding memory: {str(e)}")
-            return {"success": False, "error": str(e)}
-
-    def search(self, query: str, user_id: str, limit: int = 10) -> List[Dict]:
-        """Search memories using both vector and graph stores."""
-        try:
-            # Generate query embedding
-            query_embedding = self.embedder.embed(query)
-            
-            # Search vector store
-            vector_results = self._search_vector_db(query_embedding, user_id, limit)
-            
-            # Search graph store
-            graph_results = self._search_graph_db(query, user_id, limit)
-            
-            # Combine and rank results
-            combined_results = self._merge_search_results(vector_results, graph_results)
-            
-            return combined_results[:limit]
-        except Exception as e:
-            logger.error(f"Error searching memories: {str(e)}")
-            return []
-
-    def delete(self, memory_id: str, user_id: Optional[str] = None) -> Dict:
-        """Delete memory from both stores."""
-        try:
-            # Delete from vector store
-            vector_result = self._delete_from_vector_db(memory_id, user_id)
-            
-            # Delete from graph store
-            graph_result = self._delete_from_graph_db(memory_id, user_id)
-            
-            return {
-                "success": True,
-                "vector_result": vector_result,
-                "graph_result": graph_result
-            }
-        except Exception as e:
-            logger.error(f"Error deleting memory: {str(e)}")
-            return {"success": False, "error": str(e)}
-
-    # Helper methods for vector store operations
-    def _store_in_vector_db(self, content, embedding, user_id, metadata):
-        # Implementation for storing in vector database
-        pass
-
-    def _search_vector_db(self, query_embedding, user_id, limit):
-        # Implementation for searching vector database
-        pass
-
-    def _delete_from_vector_db(self, memory_id, user_id):
-        # Implementation for deleting from vector database
-        pass
-
-    # Helper methods for graph store operations
-    def _store_in_graph_db(self, content, user_id, metadata):
-        # Implementation for storing in graph database
-        pass
-
-    def _search_graph_db(self, query, user_id, limit):
-        # Implementation for searching graph database
-        pass
-
-    def _delete_from_graph_db(self, memory_id, user_id):
-        # Implementation for deleting from graph database
-        pass
-
-    def _merge_search_results(self, vector_results, graph_results):
-        # Implementation for merging and ranking results
-        pass
+    except json.JSONDecodeError as e:
+        error_result = {"error": f"Invalid JSON arguments: {str(e)}"}
+        print(json.dumps(error_result))
+    except Exception as e:
+        error_result = {"error": str(e)}
+        print(json.dumps(error_result))

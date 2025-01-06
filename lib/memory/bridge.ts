@@ -36,29 +36,31 @@ export class Mem0Bridge {
 
   private async runPythonCommand(command: string, args: any): Promise<any> {
     const options: Options = {
-      mode: 'text' as const,
-      pythonPath: 'python',
-      pythonOptions: ['-u'],
-      args: [command, JSON.stringify(args)]
+        mode: 'text' as const,
+        pythonPath: 'python',
+        pythonOptions: ['-u'],  // Add -u for unbuffered output
+        args: [command, JSON.stringify(args)],
+        stderrParser: line => line  // Capture stderr output
     };
 
     try {
-      console.log(`Running Python command: ${command}`);
-      console.log(`With args:`, args);
-      
-      const results = await PythonShell.run(this.pythonPath, options);
-      console.log('Python results:', results);
+        console.log(`Running Python command: ${command}`);
+        console.log(`With args:`, args);
+        console.log(`Python script path:`, this.pythonPath);
+        
+        const results = await PythonShell.run(this.pythonPath, options);
+        console.log('Python results:', results);
 
-      if (!results || !results[0]) {
-        throw new Error('No response from Python script');
-      }
+        if (!results || !results[0]) {
+            throw new Error('No response from Python script');
+        }
 
-      return JSON.parse(results[0]);
+        return JSON.parse(results[0]);
     } catch (error) {
-      console.error('Python bridge error:', error);
-      throw error;
+        console.error('Python bridge error:', error);
+        throw error;
     }
-  }
+}
 
   /**
    * Create a new memory entry
