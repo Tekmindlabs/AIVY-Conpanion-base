@@ -1,27 +1,30 @@
-# example_usage.py
-import asyncio
 from memory_manager import EnhancedMemoryManager
 from config import DEFAULT_CONFIG
 
 async def main():
-    # Initialize memory manager
+    # Initialize manager
     memory_manager = EnhancedMemoryManager(DEFAULT_CONFIG)
     
-    # Add memory
-    memory_result = await memory_manager.add_memory(
-        content="User prefers visual learning and enjoys programming in Python",
-        user_id="user123",
-        metadata={"type": "preference", "source": "chat"}
-    )
-    print(f"Memory added: {memory_result}")
+    # Check health
+    health_status = await memory_manager.health_check()
+    print(f"System health: {health_status}")
     
-    # Search memories
-    search_results = await memory_manager.search_memories(
-        query="What are the user's learning preferences?",
+    # Add memory
+    result = await memory_manager.add_memory(
+        content="User prefers visual learning",
         user_id="user123",
-        limit=5
+        metadata={"type": "preference"}
     )
-    print(f"Search results: {search_results}")
+    
+    # Get statistics
+    stats = await memory_manager.get_memory_stats("user123")
+    print(f"Memory stats: {stats}")
+    
+    # Cleanup old memories
+    await memory_manager.cleanup_old_memories("user123", days_old=30)
+    
+    # Disconnect
+    await memory_manager.disconnect()
 
 if __name__ == "__main__":
     asyncio.run(main())
