@@ -1,4 +1,3 @@
-# memory_manager.py
 import logging
 import asyncio
 from datetime import datetime, timedelta
@@ -14,6 +13,76 @@ import json
 
 logger = logging.getLogger(__name__)
 
+class BaseMessage:
+    def __init__(self, content: str, creator: str, metadata: Dict = None):
+        self.content = content
+        self.creator = creator 
+        self.metadata = metadata or {}
+        self.timestamp = datetime.now().isoformat()
+
+class ChatMessage(BaseMessage):
+    def __init__(self, human_message: str = None, ai_message: str = None):
+        super().__init__(content=human_message or "", creator="human")
+        self.human_message = human_message
+        self.ai_message = ai_message
+
+ class EnhancedMemoryManager:
+    # Existing initialization code...
+
+    async def add_message(self, message: ChatMessage, user_id: str):
+        """Add a new message to memory"""
+        try:
+            metadata = {
+                "user_id": user_id,
+                "timestamp": message.timestamp,
+                "type": "chat_message"
+            }
+            
+            # Store in vector database
+            vector_id = await self._store_in_vector_db(
+                content=message.human_message,
+                user_id=user_id,
+                metadata=metadata
+            )
+            
+            # Store in graph database
+            graph_id = await self._store_in_graph_db(
+                content=message.human_message,
+                user_id=user_id,
+                metadata=metadata
+            )
+            
+            return {
+                "status": "success",
+                "vector_id": vector_id,
+                "graph_id": graph_id
+            }
+        except Exception as e:
+            self._handle_errors("add_message", e)
+
+    async def get_chat_history(self, user_id: str, limit: int = 100):
+        """Retrieve chat history for a user"""
+        try:
+            # Search vector store
+            filter_query = f"metadata.user_id = '{user_id}' AND metadata.type = 'chat_message'"
+            memories = await self.vector_store.search(
+                filter=filter_query,
+                limit=limit
+            )
+            
+            # Format results
+            chat_history = []
+            for mem in memories:
+                chat_history.append({
+                    "content": mem.page_content,
+                    "metadata": mem.metadata,
+                    "timestamp": mem.metadata.get("timestamp")
+                })
+                
+            return sorted(chat_history, key=lambda x: x["timestamp"])
+        except Exception as e:
+            self._handle_errors("get_chat_history", e)
+                   
 class EnhancedMemoryManager:
     def __init__(self, config: Dict):
         """Initialize the EnhancedMemoryManager with configuration"""
