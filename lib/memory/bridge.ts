@@ -38,15 +38,25 @@ export class Mem0Bridge {
     const options: Options = {
         mode: 'text' as const,
         pythonPath: 'python',
-        pythonOptions: ['-u'],  // Add -u for unbuffered output
+        pythonOptions: ['-u'],
         args: [command, JSON.stringify(args)],
-        stderrParser: line => line  // Capture stderr output
+        stderrParser: line => line,
+        env: {
+            ...process.env,
+            MILVUS_URL: process.env.MILVUS_URL,
+            MILVUS_TOKEN: process.env.MILVUS_TOKEN,
+            NEO4J_URL: process.env.NEO4J_URL,
+            NEO4J_USER: process.env.NEO4J_USER,
+            NEO4J_PASSWORD: process.env.NEO4J_PASSWORD,
+            GOOGLE_API_KEY: process.env.GOOGLE_API_KEY
+        }
     };
 
     try {
         console.log(`Running Python command: ${command}`);
         console.log(`With args:`, args);
         console.log(`Python script path:`, this.pythonPath);
+        console.log('Environment variables:', options.env);
         
         const results = await PythonShell.run(this.pythonPath, options);
         console.log('Python results:', results);
