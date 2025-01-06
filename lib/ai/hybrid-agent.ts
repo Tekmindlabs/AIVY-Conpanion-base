@@ -1,8 +1,10 @@
+import { v4 as uuidv4 } from 'uuid';
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { createEmotionalAgent } from "./emotional-agent";
 import { MemoryService } from "../memory/memory-service";
 import { Message } from "@/types/chat";
 import { AgentState, EmotionalState, AgentRole } from "./agents";
+import { MemoryTools } from "../memory/memory-tools";
 
 // Define base interfaces
 interface ReActStep {
@@ -22,7 +24,17 @@ interface Memory {
     learningStyle?: string;
     difficulty?: string;
     interests?: string[];
+    contentType?: string;
+    context?: any;
+    messages?: Message[];
   };
+}
+
+interface SearchResult {
+  id: string;
+  content: string;
+  userId: string;
+  metadata?: any;
 }
 
 export interface HybridState extends AgentState {
@@ -39,7 +51,6 @@ export interface HybridState extends AgentState {
     };
     recommendations: string;
     previousMemories?: Memory[];
-    // Add these missing properties
     personalPreferences: {
       interests?: string[];
       communicationStyle?: string;
@@ -73,41 +84,57 @@ interface HybridResponse {
   userId: string;
 }
 
+const createMessage = (content: string, role: 'user' | 'assistant'): Message => ({
+  id: uuidv4(),
+  content,
+  role,
+  createdAt: new Date()
+});
+
 export const createHybridAgent = (model: any, memoryService: MemoryService) => {
   const emotionalAgent = createEmotionalAgent(model);
-  
+  const memoryTools = new MemoryTools(memoryService);
+
+  const calculateConnectionStrength = (dynamics: any): string => {
+    const interactionCount = dynamics.interactionHistory?.length || 0;
+    const trustLevel = dynamics.trustLevel || 'building';
+    
+    if (interactionCount > 20 && trustLevel === 'high') return 'strong';
+    if (interactionCount > 10) return 'moderate';
+    return 'building';
+  };
+
   const executeReActStep = async (
     step: string, 
     state: HybridState,
     emotionalState: EmotionalState,
-    memories: any[]
+    memories: Memory[]
   ): Promise<ReActStep> => {
+    const memoryContext = memories
+      .map((memory: Memory) => 
+        `Memory: ${memory.content} (Emotional: ${memory.emotionalState?.mood || 'Unknown'})`
+      )
+      .join('\n');
+
     const prompt = `
-      As an empathetic AI companion:
+      As an empathetic AI companion with memory context:
       
-      Current Context:
-      - Emotional State: ${emotionalState.mood}
-      - Connection Level: ${emotionalState.confidence}
-      - Conversation History: ${state.reactSteps?.length || 0} interactions
+      Memory Context:
+      ${memoryContext}
       
-      Previous Interactions & Patterns:
-      ${memories.map(m => `- ${m.content || m.text} (Emotional State: ${m.emotionalState?.mood || 'Unknown'})`).join('\n')}
+      Current Emotional State: ${emotionalState.mood} (Confidence: ${emotionalState.confidence})
+      Current User Context:
+      - Trust Level: ${state.context.relationshipDynamics.trustLevel}
+      - Connection Strength: ${state.context.relationshipDynamics.connectionStrength}
+      - Previous Interactions: ${state.context.relationshipDynamics.interactionHistory?.join(', ')}
       
-      Companion Guidelines:
-      1. Show genuine empathy and understanding
-      2. Maintain consistent emotional support
-      3. Remember personal details and preferences
-      4. Adapt communication style to user needs
-      5. Encourage positive growth and well-being
+      User Preferences:
+      - Communication Style: ${state.context.personalPreferences.communicationStyle}
+      - Interests: ${state.context.personalPreferences.interests?.join(', ')}
       
       Current Situation: ${step}
-      
-      Provide:
-      1. Your understanding and emotional response
-      2. Planned supportive action
-      3. Expected impact on user's well-being
     `;
-  
+
     const result = await model.generateContent({
       contents: [{
         role: "user",
@@ -116,15 +143,14 @@ export const createHybridAgent = (model: any, memoryService: MemoryService) => {
     });
     
     const response = result.response.text();
-    const [thought, action, observation] = response.split('\n\n');
+    const [thought, action, observation] = response.split('\n');
     
     return {
-      thought: thought.replace('Understanding: ', '').trim(),
-      action: action.replace('Supportive Action: ', '').trim(),
-      observation: observation.replace('Expected Impact: ', '').trim()
+      thought: thought || 'Processing input',
+      action: action || 'Generating response',
+      observation: observation || 'Analyzing interaction'
     };
   };
-
 
   return {
     process: async (state: HybridState): Promise<HybridResponse> => {
@@ -134,17 +160,25 @@ export const createHybridAgent = (model: any, memoryService: MemoryService) => {
           throw new Error("Invalid message format - content is required");
         }
 
-        // Search memories with proper error handling
-        const relevantMemories = await memoryService.searchMemories(
+        // Transform search results into Memory objects
+        const searchResults = await memoryService.searchMemories(
           lastMessage.content,
           state.userId,
           5
-        ).catch(error => {
-          console.warn('Memory search failed:', error);
-          return [];
-        });
+        ) as SearchResult[];
 
-        // Emotional analysis
+        const relevantMemories: Memory[] = searchResults.map((result: SearchResult): Memory => ({
+          id: result.id,
+          content: result.content,
+          emotionalState: result.metadata?.emotionalState || { 
+            mood: 'neutral', 
+            confidence: 'medium' 
+          },
+          timestamp: result.metadata?.timestamp || new Date().toISOString(),
+          userId: result.userId,
+          metadata: result.metadata
+        }));
+
         const emotionalAnalysis = await emotionalAgent({
           ...state,
           context: {
@@ -153,7 +187,6 @@ export const createHybridAgent = (model: any, memoryService: MemoryService) => {
           }
         });
 
-        // ReAct Planning
         const reactStep = await executeReActStep(
           state.currentStep,
           state,
@@ -161,60 +194,33 @@ export const createHybridAgent = (model: any, memoryService: MemoryService) => {
           relevantMemories
         );
 
-        // Generate response
-        const responsePrompt = `
-          Context:
-          - Emotional Analysis: ${JSON.stringify(emotionalAnalysis)}
-          - Conversation History: ${JSON.stringify(reactStep)}
-          - Personal History: ${JSON.stringify(relevantMemories)}
-          
-          User Message: ${lastMessage.content}
-          
-          As a supportive AI companion, generate a response that:
-          1. Shows genuine understanding of emotions and needs
-          2. Maintains a warm and personal connection
-          3. References shared history and previous conversations
-          4. Offers emotional support and encouragement
-          5. Adapts tone and style to user preferences
-          6. Promotes well-being and positive growth
-          
-          Response Guidelines:
-          - Use empathetic and inclusive language
-          - Balance support with respect for autonomy
-          - Include specific references to past interactions
-          - Maintain appropriate emotional boundaries
-          - End with an engaging question or supportive statement
-        `;
-
         const response = await model.generateContent({
           contents: [{ 
             role: "user", 
-            parts: [{ text: responsePrompt }]
+            parts: [{ text: lastMessage.content }]
           }]
         });
 
-        // Store interaction with proper memory format
-        const memoryContent = {
+        const newMemory = {
           userId: state.userId,
-          contentType: 'conversation',
           content: lastMessage.content,
           metadata: {
-            messages: state.messages.map(msg => ({
-              content: msg.content,
-              role: msg.role,
-              timestamp: new Date().toISOString()
-            })),
+            messages: [createMessage(lastMessage.content, 'user')],
             emotionalState: emotionalAnalysis.emotionalState,
             reactStep,
-            context: state.context
+            context: state.context,
+            timestamp: new Date().toISOString()
           }
         };
 
-        // Add memory with proper error handling
-        await memoryService.addMemory(memoryContent).catch(error => {
-          console.error('Error adding memory:', error);
-          // Continue execution even if memory storage fails
-        });
+        await memoryService.addMemory(newMemory);
+
+        if (state.context.relationshipDynamics.interactionHistory) {
+          state.context.relationshipDynamics.interactionHistory.push(lastMessage.content);
+        }
+        
+        state.context.relationshipDynamics.connectionStrength = 
+          calculateConnectionStrength(state.context.relationshipDynamics);
 
         const responseText = response.response.text();
 
@@ -234,9 +240,9 @@ export const createHybridAgent = (model: any, memoryService: MemoryService) => {
           success: false,
           error: error instanceof Error ? error.message : 'Unknown error',
           reactSteps: state.reactSteps || [],
+          timestamp: new Date().toISOString(),
           currentStep: state.currentStep,
-          userId: state.userId,
-          timestamp: new Date().toISOString()
+          userId: state.userId
         };
       }
     }
