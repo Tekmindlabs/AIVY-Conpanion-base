@@ -54,6 +54,11 @@ interface ChatMetadata {
   memoryContext?: {
     relevantMemoriesCount: number;
     memoryId: string;
+    memories: Array<{  // Add this property
+      id: string;
+      content: string;
+      timestamp?: string;
+    }>;
   };
 }
 
@@ -285,16 +290,17 @@ await memoryService.addMemory({
     };
 
     // Store chat in database
-    await prisma.chat.create({
-      data: {
-        userId: user.id,
-        message: lastMessage.content,
-        response: finalResponse,
-        metadata: chatMetadata,
-      },
-    }).catch((dbError: Error) => {
-      console.error("Error saving chat to database:", dbError);
-    });
+    const chatMetadataForPrisma = JSON.parse(JSON.stringify(chatMetadata)) as Record<string, any>;
+
+// Store chat in database
+await prisma.chat.create({
+  data: {
+    userId: user.id,
+    message: lastMessage.content,
+    response: finalResponse,
+    metadata: chatMetadataForPrisma, // Use the converted metadata
+  },
+});
 
     // Stream response
     currentStep = STEPS.STREAM;

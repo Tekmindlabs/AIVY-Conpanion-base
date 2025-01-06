@@ -141,14 +141,17 @@ export const createHybridAgent = (model: any, memoryService: MemoryService) => {
     step: string, 
     state: HybridState,
     emotionalState: EmotionalState,
-    memories: Memory[]
+    memories: Memory[] // This typing is correct
   ): Promise<ReActStep> => {
+    // Type assertion for memories array if needed
+    const typedMemories = memories as Memory[];
+  
     const emotionalTrends = state.emotionalHistory
       ?.slice(-5)
       .map(h => `${h.mood} (${h.timestamp})`)
-      .join(' -> ');
+      .join(' -> ') || 'No emotional history';
   
-    const memoryContext = memories
+    const memoryContext = typedMemories
       .map(memory => ({
         content: memory.content,
         emotion: memory.emotionalState?.mood,
@@ -162,7 +165,7 @@ export const createHybridAgent = (model: any, memoryService: MemoryService) => {
          Related: ${m.relationships.join(', ')}`
       )
       .join('\n');
-
+  
     const prompt = `
       As an empathetic AI companion with memory context:
       

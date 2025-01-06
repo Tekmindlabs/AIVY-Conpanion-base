@@ -1,7 +1,7 @@
 // lib/memory/memory-service.ts
 import { getMem0Client } from './mem0-client';
 import { getMilvusClient } from '../milvus/client';
-import { Neo4jDriver } from 'neo4j-driver';
+import { Driver, driver } from 'neo4j-driver';
 import { v4 as uuidv4 } from 'uuid';
 
 export interface MemoryContent {
@@ -21,18 +21,19 @@ export interface MemoryResult {
 export class MemoryService {
   private memory = getMem0Client();
   private milvus = getMilvusClient();
-  private neo4j: Neo4jDriver;
+  private neo4j: Driver;
 
-  constructor() {
-    if (!process.env.NEO4J_URL || !process.env.NEO4J_USER || !process.env.NEO4J_PASSWORD) {
-      throw new Error('Neo4j configuration missing');
-    }
-    
-    this.neo4j = Neo4jDriver.driver(
-      process.env.NEO4J_URL,
-      Neo4jDriver.auth.basic(process.env.NEO4J_USER, process.env.NEO4J_PASSWORD)
-    );
+  // In memory-service.ts constructor
+constructor() {
+  if (!process.env.NEO4J_URI || !process.env.NEO4J_USERNAME || !process.env.NEO4J_PASSWORD) {
+    throw new Error('Neo4j configuration missing');
   }
+  
+  this.neo4j = Neo4jDriver.driver(
+    process.env.NEO4J_URI,
+    Neo4jDriver.auth.basic(process.env.NEO4J_USERNAME, process.env.NEO4J_PASSWORD)
+  );
+}
 
   async addMemory({
     userId,
